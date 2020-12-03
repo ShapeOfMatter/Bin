@@ -67,10 +67,12 @@ command_pattern = args.command
 source_path, source_full_name = path.split(source)
 source_first_name, source_extension = path.splitext(source_full_name)
 source_date = path.getmtime(source)
-found_dest, dest_date = find_youngest(
-    (temp_dir if temp_dir else source_path + '.temp/')
-    + (dest if dest else source_first_name + ".*")
-)
+found_dest, dest_date = find_youngest(path.join(
+    *([temp_dir]
+      if temp_dir
+      else [source_path, '.temp']),
+    (dest if dest else source_first_name + ".*")
+))
 
 command = [apply_placeholders(f, source, found_dest) for f in command_pattern]
 
