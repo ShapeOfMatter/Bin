@@ -1,74 +1,163 @@
 #!/usr/bin/env python3
 
-import argparse as ag
-import os.path as path
+from argparse import ArgumentTypeError, ArgumentParser
+from os.path import exists, join, normpath
+from os import geteuid, stat
 import re
-
-print("Attempting to set system76 keyboard backlight color and brightness.")
+import stat as stat_consts
+from sys import argv
+from typing import NamedTuple
 
 """
-Partially cribbed from
+Inspiration taken from:
 https://github.com/ahoneybun/keyboard-color-chooser/blob/master/keyboard-color-switcher.py
-
-Called by 
-/etc/systemd/system/system76-kb-backlight.service
-as decribed here:
 https://www.howtogeek.com/687970/how-to-run-a-linux-program-at-startup-with-systemd/
 
-Example file /etc/systemd/system/system76-kb-backlight.service
+Example file /etc/systemd/system/system76-kb-backlight.service:
+(because I'm assuming you want this to run on boot.)
+(Don't forget to enable the service.)
+(Wrap in systemd-cat for proper logging.)
 ```
 [Unit]
 Description=Set color and brightness of system-76 laptop keyboard backlight
 
 [Service]
 Type=simple
-ExecStart=systemd-cat /home/makobates/.local/bin/set_system76_kb_backlight -g 55 -r FF -B 150
+ExecStart=systemd-cat /home/makobates/.local/bin/set_system76_kb_backlight -c FF1100 -B 150
 
 [Install]
 WantedBy=multi-user.target
 ```
-(Don't forget to enable the service.)
 """
 
-def color_fragment(string):
-    if re.fullmatch(r'^[0-9A-F]{2}$', string):
-        return string
+color_hex_regex = re.compile(
+    r"""^[0x\\#&uh+]* # Ignore leading prefix characters.
+        ([0-9a-f]{2}) # 2 digits for red...
+        ([0-9a-f]{2}) # etc
+        ([0-9a-f]{2})
+        [x\\#&uh+]*$  # Ignore trailing suffix characters, not including 0.""",
+    flags = re.I | re.X
+)
+
+class Percent:
+    def __init__(self, value):
+        self.val = int(value)
+        if not 0 <= self.val <= 100:
+            raise ArgumentTypeError(f'Value "{value}" out of bounds: 0-100.')
+
+    def byte(self):
+        return int(self.val * 255 / 100)
+
+    def __str__(self):
+        return f'{self.val}%'
+
+class RGB(NamedTuple):
+    red: int
+    green: int
+    blue: int
+
+    def __str__(self):
+        return "{red:02X}{green:02X}{blue:02X}".format(
+            red=self.red, green=self.green, blue=self.blue
+        )
+    
+def rgb(string):
+    match = color_hex_regex.fullmatch(string)
+    if match:
+        return RGB(red=int(match.group(1), 16),
+                   green=int(match.group(2), 16),
+                   blue=int(match.group(3), 16))
     else:
-        raise ag.ArgumentTypeError(f'"{string}" is not a two-digit hex value.')
+        raise ArgumentTypeError(f'"{string}" is not a valid hex color code.')
 
-def brightness_fragment(string):
-    if re.fullmatch(r'^[0-9]{1,3}$', string) and 0 <= int(string) and 255 >= int(string):
-        return string
-    else:
-        raise ag.ArgumentTypeError(f'"{string}" is not an integer 0-255.')
+def get_config_or_die():
+    arg_parse = ArgumentParser(
+        description="Set the color and brightness of the system76 keyboard backlight.",
+        epilog="Most args should be integers in the range 0-100."
+    )
+    arg_parse.add_argument('-r', '--red',
+                           help="The red RGB value.",
+                           default=Percent(0),
+                           type=Percent)
+    arg_parse.add_argument('-g', '--green',
+                           help="The green RGB value.",
+                           default=Percent(0),
+                           type=Percent)
+    arg_parse.add_argument('-b', '--blue',
+                           help="The blue RGB value.",
+                           default=Percent(0),
+                           type=Percent)
+    arg_parse.add_argument('-c', '--color',
+                           help="The RGB hex value. (six digits, common suffixes and prefixes will be dropped)",
+                           default=None,
+                           type=rgb)
+    arg_parse.add_argument('-B', '--brightness',
+                           help="The brightness.",
+                           default=Percent(19),
+                           type=Percent)
+    arg_parse.add_argument('-q', '--quiet',
+                           help="Supress print statements.",
+                           action='store_false',
+                           dest='verbose')
+    args = arg_parse.parse_args()
+    brightness = args.brightness.byte()
+    color = (args.color
+             if args.color is not None
+             else RGB(red=args.red.byte(),
+                      green=args.green.byte(),
+                      blue=args.blue.byte()))
+    log_action = print if args.verbose else lambda *_, **__: None
+    return color, brightness, log_action, arg_parse.exit
 
-arg_parse = ag.ArgumentParser(description="Set the color and brightness of the system76 keyboard backlight.")
-arg_parse.add_argument('-r', help="The red RGB value (00 to FF).", default="00", type=color_fragment)
-arg_parse.add_argument('-g', help="The green RGB value (00 to FF).", default="00", type=color_fragment)
-arg_parse.add_argument('-b', help="The blue RGB value (00 to FF).", default="00", type=color_fragment)
-arg_parse.add_argument('-B', help="The brightness (0 to 255).", default="48", type=brightness_fragment)
+def be_root_and_installed_for_root_or_die(exit):
+    if 0 != geteuid():
+        exit(2, "This script has to write to root-only files, so you have to be root to run it.\n")
+    self_path_stats = [stat(path) for path in (__file__, argv[0])]
+    for result in self_path_stats:
+        if (0 != result.st_uid) or (
+            result.st_mode & (stat_consts.S_IWGRP | stat_consts.S_IWOTH)
+        ):
+            exit(2, "This script is expected to run, automatically, as root.\n"
+                    "It would be insecure for it to be modifiable by anyone but root.\n"
+                    "Update the ownership and permissions.\n")
 
-args = arg_parse.parse_args()
-red = args.r
-green = args.g
-blue = args.b
-brightness = args.B
-color = f'{red}{green}{blue}'
 
-ledPath = "/" + path.join('sys', 'class', 'leds', 'system76_acpi::kbd_backlight') + '/'
-if not path.exists(ledPath):
-    ledPath = "/" + path.join('sys', 'class', 'leds', 'system76::kbd_backlight') + '/'
+def set_backlight_or_die(brightness, color, exit):
+    def valid_abs_path(*p):
+        path = normpath('/' + join(*p))
+        return path if exists(path) else None
 
-regions = ['left', 'center', 'right', 'extra']
-region_paths = [ledPath + f'color_{r}' for r in regions]
-brightness_path = ledPath + 'brightness'
-settings = {brightness_path: brightness,
-            **{rp: color for rp in region_paths}}
+    possible_led_dirs = [
+        ('sys', 'class', 'leds', 'system76_acpi::kbd_backlight'),
+        ('sys', 'class', 'leds', 'system76::kbd_backlight')
+    ]
+    led_dir = next((d for d in possible_led_dirs if valid_abs_path(*d)), None)
+    if led_dir is None:
+        exit(2, "Unable to find the LED control paths.\n")
 
-for (p,s) in settings.items():
-    with open(p, 'w') as f:
-        f.write(s)
+    color_regions = ('color_left', 'color_center', 'color_right', 'color_extra')
+    settings = {
+        key: str(value)
+        for (key, value)
+        in [(valid_abs_path(*led_dir, 'brightness'), brightness),
+            *[(valid_abs_path(*led_dir, region), color)
+              for region in color_regions]]
+        if key is not None
+    }
+    if len(settings) < 2:
+        exit(2, "Unable to find the LED control files.\n")
 
-print("Successfully set system76 keyboard backlight brightness.")
-arg_parse.exit(0)
+    for (p,s) in settings.items():
+        with open(p, 'w') as f:
+            f.write(s)
 
+def main():
+    color, brightness, log, exit = get_config_or_die()
+    be_root_and_installed_for_root_or_die(exit)
+    log("Attempting to set system76 keyboard backlight color and brightness.")
+    set_backlight_or_die(brightness, color, exit)
+    log("Successfully set system76 keyboard backlight brightness.")
+    exit(0)
+
+if __name__ == '__main__':
+    main()
