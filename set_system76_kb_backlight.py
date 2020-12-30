@@ -73,7 +73,8 @@ def rgb(string):
 def get_config_or_die():
     arg_parse = ArgumentParser(
         description="Set the color and brightness of the system76 keyboard backlight.",
-        epilog="Most args should be integers in the range 0-100."
+        epilog="Most args should be integers in the range 0-100.\n"
+               "Color (-c) trumps channels (-r, -g, -b).\n"
     )
     arg_parse.add_argument('-r', '--red',
                            help="The red RGB value.",
