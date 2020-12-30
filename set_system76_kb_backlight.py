@@ -120,7 +120,7 @@ def be_root_and_installed_for_root_or_die(exit):
         ):
             exit(2, "This script is expected to run, automatically, as root.\n"
                     "It would be insecure for it to be modifiable by anyone but root.\n"
-                    "Update the ownership and permissions.\n")
+                    "Use chown and chmod so only the owner, root, can write.\n")
 
 
 def set_backlight_or_die(brightness, color, exit):
